@@ -1,43 +1,51 @@
 # lau-sheaf-neural
 
-**Sheaf-theoretic neural networks — replacing graph Laplacians with sheaf Laplacians to overcome over-squashing in GNNs.**
+**Sheaf-theoretic neural networks — replacing graph Laplacians with sheaf Laplacians.**
 
-[![Rust](https://img.shields.io/badge/rust-2021-orange.svg)](https://www.rust-lang.org/)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+A Rust library implementing sheaf neural networks (SheafNet), which overcome **over-squashing** in GNNs by replacing the graph Laplacian with the **sheaf Laplacian** — a richer operator that encodes local geometry via restriction maps between stalks.
 
-127 tests · 4,031 lines of Rust · 10 modules
+[![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 
 ---
 
 ## What This Does
 
-Standard Graph Neural Networks (GNNs) assign a single feature vector to each node and pass messages along edges via the graph Laplacian. When the graph has low-curvature "bottleneck" edges, distant nodes cannot effectively communicate — this is **over-squashing**.
+Standard graph neural networks (GNNs) suffer from **over-squashing**: on graphs with bottleneck edges (low curvature), exponentially-growing neighborhoods get compressed into fixed-size vectors, preventing distant nodes from communicating effectively.
 
-This crate solves over-squashing by replacing the graph Laplacian with the **sheaf Laplacian**. A **cellular sheaf** assigns a vector space (stalk) to each node and a linear map (restriction map) to each edge, providing richer geometry-aware information flow.
+**Sheaf neural networks** solve this by enriching the graph with a **cellular sheaf**:
 
-You get:
-- A complete **cellular sheaf** data structure with configurable stalks and restriction maps
-- **Sheaf Laplacian** (standard, normalized, connection) construction
-- **Sheaf diffusion** layers for neural network message passing
-- **Sheaf attention** — learn restriction maps from data (like GAT for sheaves)
-- **p-Laplacian** for nonlinear sheaf diffusion (p=1 → min-cut, p=2 → linear, p>2 → contrast)
-- **Multi-hop sheaf** — compose restriction maps across k-hop paths
-- **Sheaf pooling** — hierarchy-aware graph coarsening
-- **Over-squashing diagnosis** via sheaf curvature
-- **PLATO agents** — model multi-agent communication as a sheaf neural network
+- Each node v gets a **stalk** F(v) — a vector space (possibly higher-dimensional than the feature vector)
+- Each edge (v, w) gets a **restriction map** F_{v≺e}: F(v) → F(w) — a linear map encoding the relationship
+- The **sheaf Laplacian** LΣ respects these maps, providing directed, geometry-aware message passing
+
+This crate provides:
+
+- **Cellular sheaves** — the core data structure
+- **Sheaf Laplacian** — the operator powering sheaf diffusion
+- **Sheaf diffusion** — continuous message passing layers (dx/dt = −σ(LΣ x + b))
+- **Sheaf attention** — learn restriction maps from data (attention mechanism)
+- **Connection Laplacian** — for oriented sheaves with unitary restriction maps
+- **Sheaf curvature** — diagnose over-squashing via Ollivier-Ricci-style curvature
+- **p-Laplacian** — nonlinear sheaf diffusion (p > 2 for stronger smoothing)
+- **Multi-hop sheaf** — compose restriction maps across k-hop neighborhoods
+- **Sheaf pooling** — hierarchy-preserving graph coarsening
+- **PLATO agent communication** — multi-agent systems modeled as sheaf neural networks
 
 ---
 
 ## Key Idea
 
-```
-Standard GNN:    L_graph = D - A          (scalar edge weights)
-Sheaf Neural:    L_sheaf = B^T B          (matrix restriction maps)
-```
+The **graph Laplacian** L = D − A treats all edges identically — information flows equally in all directions. The **sheaf Laplacian** generalizes this:
 
-The graph Laplacian treats every edge as a scalar weight. The **sheaf Laplacian** treats every edge as a linear map between stalks. When the restriction maps are identity matrices, the sheaf Laplacian reduces to the standard graph Laplacian. When they're learned, the sheaf adapts to the geometry of the data.
+> LΣ = B · diag(|Σ_e|²) · B^T
 
-**Over-squashing** occurs on edges with negative Ollivier-Ricci curvature. The sheaf can *fix* these bottlenecks by learning restriction maps that expand the effective channel capacity. This is impossible with scalar weights alone.
+where B is the incidence matrix and Σ_e are the restriction maps. When Σ_e = identity for all edges, LΣ reduces to L. But when Σ_e encodes meaningful relationships (rotations, projections, embeddings), LΣ provides **directed, geometry-aware** information flow.
+
+The sheaf curvature at edge (i, j):
+
+> κ_Σ(i, j) = 1 − ||Σ_{ji} + Σ_{ij}||_F / 2
+
+Negative curvature edges are bottlenecks. The sheaf can **fix** them by learning restriction maps that increase curvature, improving information flow.
 
 ---
 
@@ -48,285 +56,352 @@ The graph Laplacian treats every edge as a scalar weight. The **sheaf Laplacian*
 lau-sheaf-neural = "0.1"
 ```
 
-Requires Rust 2021 edition. Dependencies: `nalgebra` (with serde), `serde`, `rand`, `thiserror`.
-
 ---
 
 ## Quick Start
 
 ```rust
-use lau_sheaf_neural::*;
+use lau_sheaf_neural::{
+    CellularSheaf, SheafLaplacian, SheafDiffusion, SheafCurvature,
+    SheafAttention, SheafPLaplacian, SheafPooling, MultiHopSheaf,
+};
 use nalgebra::{DMatrix, DVector};
 
-// 1. Create a cellular sheaf on a 4-node graph, stalk dimension 3
-let mut sheaf = CellularSheaf::new_uniform(4, 3)?;
+// --- Build a cellular sheaf ---
+let mut sheaf = CellularSheaf::new_uniform(6, 2)?;  // 6 nodes, 2D stalks
+sheaf.add_edge(0, 1, DMatrix::identity(2, 2))?;
+sheaf.add_edge(1, 2, DMatrix::identity(2, 2))?;
+sheaf.add_edge(2, 3, DMatrix::identity(2, 2))?;
+sheaf.add_edge(3, 4, DMatrix::identity(2, 2))?;
+sheaf.add_edge(4, 5, DMatrix::identity(2, 2))?;
+sheaf.add_edge(5, 0, DMatrix::identity(2, 2))?;
 
-// Add edges with restriction maps
-sheaf.add_edge(0, 1, DMatrix::identity(3, 3))?;
-sheaf.add_edge(1, 2, DMatrix::identity(3, 3))?;
-sheaf.add_edge(2, 3, DMatrix::identity(3, 3))?;
-
-// 2. Build the sheaf Laplacian
-let laplacian = SheafLaplacian::from_sheaf(&sheaf)?;
-
-// 3. Create a diffusion layer (like a GNN layer)
-let diffusion = SheafDiffusion::new(sheaf.clone(), 3, Activation::ReLU)?;
-
-// 4. Run one forward pass
-let features = DVector::from_element(sheaf.total_dim, 1.0);
-let output = diffusion.forward(&features)?;
-println!("Output shape: {}", output.len()); // total_dim = 4 × 3 = 12
-
-// 5. Diagnose over-squashing
+// --- Diagnose over-squashing ---
 let curvature = SheafCurvature::from_sheaf(&sheaf, -0.5)?;
 let bottlenecks = curvature.bottleneck_edges();
-println!("Bottleneck edges: {}", bottlenecks.len());
+let score = curvature.over_squashing_score();
+println!("Over-squashing score: {:.3} (0=safe, 1=severe)", score);
+
+// --- Sheaf Laplacian ---
+let lap = SheafLaplacian::from_sheaf(&sheaf)?;
+let kernel = lap.kernel();          // Global sections (H⁰)
+let gap = lap.spectral_gap();       // Information flow speed
+println!("Spectral gap: {:.4} (higher = faster mixing)", gap);
+
+// --- Sheaf diffusion (message passing) ---
+let diffusion = SheafDiffusion::new(&sheaf, 0.1)?;  // dt = 0.1
+let x0 = DVector::from_element(sheaf.total_dim, 1.0);
+let trajectory = diffusion.integrate(&x0, 100);  // 100 diffusion steps
+
+// --- Learn restriction maps with attention ---
+let attention = SheafAttention::new(&sheaf, 4)?;  // 4 attention heads
+let updated = attention.forward(&x0);
+
+// --- Sheaf pooling (coarsen graph) ---
+let pooling = SheafPooling::new(MergeStrategy::MaxDim, 0.5);
+let result = pooling.pool_auto(&sheaf)?;
+println!("Coarsened: {} → {} nodes", sheaf.num_nodes, result.coarsened_sheaf.num_nodes);
+
+// --- Multi-hop sheaf (long-range communication) ---
+let multi = MultiHopSheaf::new(&sheaf, 3)?;  // 3-hop neighborhood
+let multi_lap = multi.sheaf_laplacian()?;
 ```
 
 ---
 
 ## API Reference
 
-### `CellularSheaf`
-The core data structure. Assigns a vector space (stalk) to each node and a linear map (restriction map) to each edge.
+### `CellularSheaf` — The Core Data Structure
 
 ```rust
-let mut sheaf = CellularSheaf::new_uniform(num_nodes, stalk_dim)?;
-sheaf.add_edge(source, target, restriction_map)?;
-sheaf.validate()?;
-let coboundary = sheaf.coboundary_matrix(); // For Laplacian construction
+pub struct CellularSheaf {
+    pub num_nodes: usize,
+    pub stalk_dims: Vec<usize>,
+    pub edges: Vec<SheafEdge>,
+    pub total_dim: usize,
+}
 ```
 
-**Builder API** for convenient construction:
-```rust
-let sheaf = SheafBuilder::new(5, 4)  // 5 nodes, stalk dim 4
-    .add_edge(0, 1)?
-    .add_edge(1, 2)?
-    .add_edge(2, 3)?
-    .add_edge(3, 4)?
-    .build();
-```
+| Method | Description |
+|--------|-------------|
+| `new_uniform(n, dim)` | Uniform stalk dimensions, no edges |
+| `new(stalk_dims, &edges)` | Custom stalk dims, edge list |
+| `with_restriction_maps(stalk_dims, edges_with_maps)` | Full control over maps |
+| `add_edge(source, target, map)` | Add an edge with restriction map |
+| `restriction_map(source, target) → &DMatrix` | Get map for edge |
+| `restriction_map_mut(source, target) → &mut DMatrix` | Mutable access |
+| `extract_stalk(node, cochain) → DVector` | Get node features from stacked vector |
+| `set_stalk(node, cochain, value)` | Set node features |
+| `coboundary_matrix() → DMatrix` | The δ⁰ operator |
+| `neighbors(node) → Vec<usize>` | Outgoing neighbors |
+| `in_neighbors(node) → Vec<usize>` | Incoming neighbors |
+| `validate() → Result` | Check consistency |
+| `trivial(n, dim)` | Trivial sheaf (identity maps) |
+| `random(n, dim, edges, seed)` | Random restriction maps |
+| `nn_sheaf(n, dim, edges, hidden)` | Neural-network-style sheaf |
 
-### `SheafLaplacian`
-Constructs L_Σ = B^T B from the coboundary map.
-
-```rust
-let lap = SheafLaplacian::from_sheaf(&sheaf)?;
-let lap_norm = SheafLaplacian::normalized(&sheaf)?;
-let eigenvalues = lap.eigenvalues();
-let energy = lap.dirichlet_energy(&cochain);
-```
-
-### `ConnectionLaplacian`
-For oriented sheaves where R_ji = R_ij^T. Constructs L_conn = D - A∘R.
-
-```rust
-let conn_lap = ConnectionLaplacian::from_oriented_sheaf(&sheaf)?;
-let spectrum = conn_lap.eigenvalues();
-```
-
-### `SheafDiffusion`
-The neural network layer. Implements `x' = σ(L_Σ x W + b)`.
+### `SheafLaplacian` — The Sheaf Laplacian Operator
 
 ```rust
-let diff = SheafDiffusion::new(sheaf.clone(), out_dim, Activation::ReLU)?;
-let output = diff.forward(&input)?;
-let multi_layer = SheafDiffusion::new_multi_layer(sheaf.clone(), &[32, 16, 8], Activation::LeakyReLU(0.01))?;
-let output = multi_layer.forward(&input)?;
+pub struct SheafLaplacian {
+    pub matrix: DMatrix<f64>,
+    pub total_dim: usize,
+}
 ```
 
-Supported activations: `Identity`, `ReLU`, `Sigmoid`, `Tanh`, `ELU(α)`, `LeakyReLU(α)`.
+| Method | Description |
+|--------|-------------|
+| `from_sheaf(&sheaf)` | Build from cellular sheaf |
+| `from_sheaf_weighted(&sheaf, weights)` | Edge-weighted variant |
+| `kernel() → Vec<DVector>` | Global sections (ker LΣ) |
+| `kernel_dimension() → usize` | dim H⁰ |
+| `eigenvalues() → Vec<f64>` | Full spectrum |
+| `spectral_gap() → f64` | Smallest non-zero eigenvalue |
+| `apply(v) → DVector` | LΣ · v |
+| `is_global_section(v) → bool` | v ∈ ker LΣ? |
 
-### `SheafAttention`
-Learns restriction maps from data, analogous to GAT.
+### `SheafDiffusion` — Continuous Message Passing
 
 ```rust
-let config = AttentionConfig::new(feature_dim, stalk_dim)
-    .with_heads(4)
-    .symmetric(true);
-let attention = SheafAttention::new(config);
-let output = attention.forward(&features, &sheaf)?;
-// output.sheaf has learned restriction maps
-// output.attention_weights shows attention per edge/head
+pub struct SheafDiffusion { /* sheaf + Laplacian + time step */ }
 ```
 
-### `SheafPLaplacian`
-Nonlinear diffusion with the p-Laplacian.
+| Method | Description |
+|--------|-------------|
+| `new(&sheaf, dt)` | Create with time step |
+| `step(x, weight, bias)` | One diffusion step: x ← x − dt·σ(LΣx + b) |
+| `integrate(x0, steps)` | Full trajectory |
+| `with_nonlinearity(activation)` | ReLU, sigmoid, tanh, or custom |
+
+### `SheafAttention` — Learn Restriction Maps
 
 ```rust
-let p_lap = SheafPLaplacian::new(sheaf.clone(), 1.5)?;
-let delta_p = p_lap.apply(&cochain);       // Δ_p(x)
-let energy = p_lap.dirichlet_energy(&cochain); // (1/p)Σ||x_v - R_vw x_w||^p
-let flow = p_lap.flow(&x0, 100, 0.01);    // Gradient flow of p-Dirichlet energy
+pub struct SheafAttention { /* attention heads over sheaf edges */ }
 ```
 
-- **p = 2**: Standard linear sheaf Laplacian
-- **p → 1**: Total variation / min-cut
-- **p > 2**: Contrast enhancement, emphasizes large differences
+| Method | Description |
+|--------|-------------|
+| `new(&sheaf, n_heads)` | Create with attention heads |
+| `forward(x) → DVector` | One forward pass (updates restriction maps + features) |
+| `attention_weights() → Vec<f64>` | Current attention scores |
 
-### `MultiHopSheaf`
-Composes restriction maps across k-hop paths for long-range information flow.
+### `ConnectionLaplacian` — Oriented Sheaf Laplacian
 
 ```rust
-let multi = MultiHopSheaf::new(sheaf.clone(), 3)?; // up to 3 hops
-let map_01_2hop = multi.get_map(0, 3, 2)?; // 2-hop map from node 0 to 3
-let lap = multi.sheaf_laplacian()?;          // Laplacian incorporating multi-hop maps
+pub struct ConnectionLaplacian { /* PSD matrix for oriented sheaves */ }
 ```
 
-### `SheafPooling`
-Sheaf-aware graph coarsening for hierarchical representations.
+| Method | Description |
+|--------|-------------|
+| `from_oriented_sheaf(&sheaf)` | Build for oriented sheaf |
+| `from_oriented_edges(&sheaf, &edges)` | Select subset of edges |
+| `is_psd() → bool` | Positive semi-definite check |
+| `connection_energy(x) → f64` | x^T L_conn x |
+| `spectral_gap() → f64` | Smallest non-zero eigenvalue |
+| `eigendecompose() → (evals, evecs)` | Full decomposition |
+| `to_connection_matrix() → DMatrix` | The connection matrix |
+
+### `SheafCurvature` — Over-Squashing Diagnosis
 
 ```rust
-let pooling = SheafPooling::new(MergeStrategy::Average, 0.5);
-let result = pooling.pool(&sheaf, &clusters)?;
-// result.coarsened_sheaf: smaller sheaf
-// result.projection: down-project features
-// result.lift: up-project features (pseudo-inverse)
+pub struct SheafCurvature {
+    pub edge_curvatures: Vec<EdgeCurvature>,
+    pub bottleneck_threshold: f64,
+}
 ```
 
-Merge strategies: `DirectSum`, `MaxDim`, `Project(d)`, `Average`.
+| Method | Description |
+|--------|-------------|
+| `from_sheaf(&sheaf, threshold)` | Compute all curvatures |
+| `min_curvature() → Option<f64>` | Worst bottleneck |
+| `mean_curvature() → f64` | Average curvature |
+| `bottleneck_edges() → Vec<&EdgeCurvature>` | All bottleneck edges |
+| `over_squashing_score() → f64` | Fraction of bottleneck edges (0–1) |
+| `effective_resistance() → Vec<(usize, usize, f64)>` | Per-edge resistance |
+| `suggest_dimension_increases(&sheaf)` | Stalk dimension recommendations |
 
-### `SheafCurvature`
-Diagnoses over-squashing by computing sheaf curvature on each edge.
+### `SheafPLaplacian` — Nonlinear Sheaf Diffusion
 
 ```rust
-let curvature = SheafCurvature::from_sheaf(&sheaf, -0.5)?;
-let min_kappa = curvature.min_curvature();
-let bottlenecks = curvature.bottleneck_edges();
-let report = curvature.summary(); // Average, min, max curvature
+pub struct SheafPLaplacian { /* p value + sheaf */ }
 ```
 
-Formula: κ_Σ(i,j) = 1 - ‖R_ij + R_ji‖_F / 2. Negative curvature = bottleneck.
+| Method | Description |
+|--------|-------------|
+| `new(&sheaf, p)` | Create with p value (p > 2 for stronger diffusion) |
+| `apply(x) → DVector` | Δ_p(x) = div(|∇_Σ x|^{p−2} ∇_Σ x) |
+| `p_energy(x) → f64` | The p-Dirichlet energy |
+| `gradient_flow(x0, dt, steps)` | Minimize p-energy via gradient descent |
 
-### `PlatoAgent` / `PlatoConfig`
-Models multi-agent communication as a sheaf neural network.
+### `MultiHopSheaf` — Long-Range Communication
 
 ```rust
-let config = PlatoConfig::default();
-let mut plato = PlatoSystem::new(config);
-plato.add_agent("agent-0", 4, "researcher");
-plato.add_agent("agent-1", 4, "coder");
-plato.add_channel(0, 1, "broadcast");
-let result = plato.communication_round()?;
-// Agents' internal states updated via sheaf diffusion
+pub struct MultiHopSheaf { /* composed restriction maps across k hops */ }
 ```
+
+| Method | Description |
+|--------|-------------|
+| `new(&sheaf, k)` | Build k-hop sheaf (compose maps up to k edges) |
+| `sheaf_laplacian() → SheafLaplacian` | Laplacian of the multi-hop sheaf |
+| `composed_map(source, target) → Option<DMatrix>` | k-hop restriction map |
+
+### `SheafPooling` — Graph Coarsening
+
+```rust
+pub enum MergeStrategy { MaxDim, Average, Project(usize) }
+
+pub struct SheafPooling { /* strategy + ratio */ }
+```
+
+| Method | Description |
+|--------|-------------|
+| `new(strategy, ratio)` | Create (ratio = target fraction of nodes) |
+| `pool(&sheaf, &clusters)` | Coarsen with given clusters |
+| `pool_auto(&sheaf)` | Automatic clustering |
+| `hierarchical_pool(&sheaf, levels)` | Multi-level coarsening |
+| `project_features(result, features)` | Features → coarsened features |
+| `lift_features(result, coarse_features)` | Coarsened → original features |
+
+### `Plato` — Multi-Agent Communication as Sheaf NN
+
+The `plato` module models PLATO-style agent communication as a sheaf neural network, where agents are nodes, communication channels are edges with restriction maps, and the diffusion process implements message passing.
 
 ---
 
 ## How It Works
 
-The crate implements a complete sheaf neural network pipeline:
+### Architecture
 
 ```
-1. Define Graph + Sheaf       (CellularSheaf)
-2. Construct Laplacian        (SheafLaplacian / ConnectionLaplacian)
-3. Diagnose Over-squashing    (SheafCurvature)
-4. Learn Restriction Maps     (SheafAttention)
-5. Run Diffusion              (SheafDiffusion / SheafPLaplacian)
-6. Extend to Multi-hop        (MultiHopSheaf)
-7. Pool Hierarchically        (SheafPooling)
-8. Apply to Agents            (PLATO)
+CellularSheaf (stalks + restriction maps)
+  ├─ SheafLaplacian (LΣ = B diag(|Σ|²) B^T)
+  │    ├─ SheafDiffusion (dx/dt = −σ(LΣ x + b))
+  │    ├─ SheafPLaplacian (nonlinear p-diffusion)
+  │    └─ ConnectionLaplacian (oriented sheaves)
+  ├─ SheafAttention (learned restriction maps)
+  ├─ SheafCurvature (κ(i,j) = 1 − ||Σ_{ij} + Σ_{ji}||_F/2)
+  ├─ MultiHopSheaf (k-hop composed maps)
+  └─ SheafPooling (hierarchical coarsening)
 ```
 
-**Step 1–2**: A cellular sheaf F on graph G assigns stalk F(v) to each node and restriction maps F_{v≺e}: F(v) → F(w) to each edge. The coboundary matrix δ₀ acts on 0-cochains (node features). The sheaf Laplacian is L_Σ = δ₀^T δ₀.
+### Module Map
 
-**Step 3**: Over-squashing is diagnosed via sheaf curvature κ_Σ on edges. Edges with κ < threshold are bottlenecks.
-
-**Step 4**: Sheaf attention learns restriction maps from node features, similar to how GAT learns edge weights but with full matrix maps instead of scalars.
-
-**Step 5**: Sheaf diffusion implements dx/dt = -σ(L_Σ x W + b), the continuous GNN on the sheaf.
-
-**Step 6**: Multi-hop sheaf composes restriction maps across paths of length k, enabling long-range communication while respecting geometry.
-
-**Step 7**: Sheaf pooling coarsens the graph while preserving sheaf structure — stalks are merged and restriction maps are composed.
-
-**Step 8**: PLATO models each agent as a node with stalk = internal state, channels = restriction maps. Communication rounds are sheaf diffusion steps.
+| Module | Contents |
+|--------|----------|
+| `sheaf` | `CellularSheaf`, `SheafEdge`, `SheafError` — core data structure |
+| `laplacian` | `SheafLaplacian` — construction, spectrum, kernel |
+| `diffusion` | `SheafDiffusion` — continuous message passing |
+| `curvature` | `SheafCurvature` — over-squashing diagnosis |
+| `connection` | `ConnectionLaplacian` — oriented sheaf operator |
+| `attention` | `SheafAttention` — learned restriction maps |
+| `p_laplacian` | `SheafPLaplacian` — nonlinear diffusion |
+| `multihop` | `MultiHopSheaf` — long-range composed maps |
+| `pooling` | `SheafPooling` — graph coarsening |
+| `plato` | PLATO agent communication as sheaf neural network |
 
 ---
 
 ## The Math
 
-### Cellular Sheaves
+### Cellular Sheaves on Graphs
 
-A **cellular sheaf** F on a graph G = (V, E) assigns:
-- A vector space F(v) (the **stalk**) to each node v ∈ V
-- A linear map F_{v≺e}: F(v) → F(w) (the **restriction map**) to each edge e = (v,w)
+A **cellular sheaf** F on a graph G assigns:
+- A **stalk** F(v) ≅ R^{d_v} to each node v (a vector space)
+- A **restriction map** F_{v≺e}: F(v) → F(w) to each directed edge e = (v, w)
 
-The space of **0-cochains** C⁰(G, F) = ⊕_v F(v) is the total feature space.
+The **0-cochain space** C⁰(G, F) = ⊕_v F(v) is the total feature space. A **cochain** x ∈ C⁰ assigns a vector x_v ∈ F(v) to each node.
 
-### Sheaf Laplacian
+### The Coboundary Map
 
-The **coboundary map** δ₀: C⁰ → C¹ acts on edges:
-```
-(δ₀ x)(e = (v,w)) = F_{w≺e}(x_w) - F_{v≺e}(x_v)
-```
+The **coboundary** δ⁰: C⁰ → C¹ maps node features to edge features:
 
-The **sheaf Laplacian** is:
-```
-L_Σ = δ₀^T δ₀
-```
+> (δ⁰ x)_{(i→j)} = F_{j≺e}(x_j) − F_{i≺e}(x_i)
 
-This is a positive semi-definite operator on C⁰. When all restriction maps are identity and all stalks have the same dimension, L_Σ reduces to the standard graph Laplacian L ⊗ I_d.
+This measures the "mismatch" between adjacent nodes' features after mapping through the restriction maps.
 
-### Over-squashing and Curvature
+### The Sheaf Laplacian
 
-**Over-squashing** occurs when the Jacobian ‖∂x_v^(T) / ∂x_w^(0)‖ decays exponentially with the distance between v and w. This happens on edges with negative **Ollivier-Ricci curvature**.
+> LΣ = (δ⁰)^T δ⁰
 
-The **sheaf curvature** extends this notion:
-```
-κ_Σ(i,j) = 1 - ‖R_ij + R_ji‖_F / 2
-```
+In matrix form, for each edge (i→j):
 
-When κ_Σ is negative, the edge is a bottleneck. The sheaf can *fix* it by learning restriction maps that increase the effective channel capacity.
+> (LΣ)_{ii} += Σ_e^T Σ_e  
+> (LΣ)_{ij} += −Σ_e^T
 
-### p-Laplacian
+The sheaf Laplacian is always **positive semi-definite**. Its kernel consists of **global sections** — cochains where x_j = F_{j≺e}^{-1} F_{i≺e}(x_i) for all edges (perfectly consistent across the graph).
 
-The **p-Laplacian** for sheaves:
-```
-Δ_p f(v) = Σ_{v~w} ‖f(v) - R_{vw} f(w)‖^{p-2} (f(v) - R_{vw} f(w))
-```
+### Over-Squashing and Curvature
 
-Special cases:
-- **p = 2**: Linear sheaf Laplacian (standard diffusion)
-- **p → 1**: Total variation minimization (solves graph min-cut)
-- **p → ∞**: Infinity Laplacian (Lipschitz extension)
+**Over-squashing** occurs when the **balanced form curvature** of the graph is too negative at certain edges. For the sheaf:
 
-The **p-Dirichlet energy** is (1/p) Σ_{v~w} ‖f(v) - R_{vw} f(w)‖^p. Gradient flow on this energy is the p-Laplacian flow.
+> κ_Σ(i, j) = 1 − ||Σ_{ji} + Σ_{ij}||_F / 2
+
+- κ > 0: Information flows freely (expanding neighborhood)
+- κ ≈ 0: Marginal
+- κ < 0: Bottleneck — information gets compressed
+
+The sheaf can **cure** over-squashing: by learning restriction maps that make κ more positive, we increase the channel capacity of bottleneck edges.
+
+### Sheaf Diffusion
+
+The continuous sheaf neural network evolves features via:
+
+> dx/dt = −σ(LΣ x + b)
+
+where σ is a nonlinearity (ReLU, etc.) and b is a bias. This is **heat equation on the sheaf** — features diffuse along edges according to the restriction maps.
+
+**Key property**: Unlike standard GNN diffusion, sheaf diffusion respects the local geometry. Two nodes connected by a rotation map exchange rotational information; nodes connected by projection maps exchange projected information.
+
+### The p-Laplacian
+
+The **p-Laplacian** generalizes diffusion with a nonlinearity:
+
+> Δ_p(x) = div(|∇_Σ x|^{p−2} ∇_Σ x)
+
+For p = 2, this reduces to the standard sheaf Laplacian. For p > 2, diffusion is **stronger** in high-gradient regions, providing more aggressive smoothing. The p-Dirichlet energy:
+
+> E_p(x) = (1/p) Σ_e |(δ⁰ x)_e|^p
+
+### Multi-Hop Sheaves
+
+To enable **long-range communication**, we compose restriction maps across k edges:
+
+> F_{i→j}^{(k)} = F_{j_{k-1}≺e_{k-1}} ∘ … ∘ F_{j_0≺e_0}
+
+The k-hop sheaf has the same stalks but composed restriction maps, allowing information to flow across distant nodes in a single diffusion step.
 
 ### Connection Laplacian
 
-For **oriented sheaves** where R_ji = R_ij^T:
-```
-L_conn = D_block - Σ_{i~j} (E_{ij} ⊗ R_{ij} + E_{ji} ⊗ R_{ij}^T)
-```
+For **oriented sheaves** (where restriction maps are orthogonal/unitary), the connection Laplacian is:
 
-This is the natural operator when edges carry directional information (e.g., SO(d) rotations).
+> L_conn = ½ (LΣ + LΣ^T)
 
----
-
-## Module Overview
-
-| Module | Tests | Key Types | Purpose |
-|--------|-------|-----------|---------|
-| `sheaf` | 18 | `CellularSheaf`, `SheafBuilder` | Core data structure |
-| `laplacian` | 12 | `SheafLaplacian` | L_Σ = B^T B |
-| `diffusion` | 14 | `SheafDiffusion`, `Activation` | Neural network layers |
-| `curvature` | 11 | `SheafCurvature`, `EdgeCurvature` | Over-squashing diagnosis |
-| `connection` | 9 | `ConnectionLaplacian` | Oriented sheaf operator |
-| `attention` | 10 | `SheafAttention`, `AttentionConfig` | Learned restriction maps |
-| `p_laplacian` | 13 | `SheafPLaplacian` | Nonlinear diffusion |
-| `multihop` | 13 | `MultiHopSheaf`, `ComposedRestrictionMap` | Long-range communication |
-| `pooling` | 13 | `SheafPooling`, `PoolingResult` | Hierarchical coarsening |
-| `plato` | 14 | `PlatoAgent`, `PlatoConfig` | Agent communication |
+with special structure: off-diagonal blocks are −R_{ij} (not −R_{ij}^T R_{ij}). This is the operator used in **spectral clustering on manifolds** and **synchronization problems**.
 
 ---
 
-## References
+## Testing
 
-- **Sheaf Neural Networks**: Hansen & Gebhart, "Sheaf Neural Networks" (2020)
-- **Over-squashing**: Topping et al., "Understanding over-squashing and bottlenecks on graphs via curvature" (ICLR 2022)
-- **Sheaf Laplacian**: Robinson, "Sheaves are the natural data structure for heterogeneous networks" (2022)
-- **p-Laplacian**: Bodnarchuk et al., "Sheaf hypergraph Laplacians" (2023)
+```bash
+cargo test
+```
+
+**127 tests** covering:
+
+- Cellular sheaf construction (uniform, custom dims, restriction maps)
+- Stalk extraction and assignment
+- Edge operations (add, query, neighbors)
+- Coboundary matrix construction
+- Sheaf Laplacian (construction, kernel, spectrum, spectral gap)
+- Sheaf diffusion (integration, nonlinearity, stability)
+- Connection Laplacian (PSD verification, energy, eigendecomposition)
+- Sheaf curvature (identity/zero/scaled maps, bottleneck detection)
+- Over-squashing diagnosis (score, effective resistance, suggestions)
+- p-Laplacian (energy, gradient flow)
+- Multi-hop sheaf (map composition, k-hop Laplacian)
+- Sheaf pooling (merge strategies, auto-clustering, hierarchical)
+- Sheaf attention (forward pass, weight updates)
+- Property-based tests (via proptest)
 
 ---
 
